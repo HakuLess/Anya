@@ -1,0 +1,42 @@
+# Android / Gradle
+.gradle/
+**/.gradle/
+**/build/
+**/out/
+
+# Local configuration
+local.properties
+**/*.iml
+.idea/
+
+# Android Studio / NDK
+.cxx/
+.externalNativeBuild/
+captures/
+.navigation/
+obj/
+
+# Artifacts
+*.apk
+*.ap_
+*.aab
+
+# Keystores & signing
+*.jks
+*.keystore
+signing.properties
+**/keystore.properties
+
+# Logs
+*.log
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**
+
+
