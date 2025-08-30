@@ -11,7 +11,7 @@ room = "2.6.1"
 navigation = "2.7.5"
 lifecycle = "2.7.0"
 coroutines = "1.7.3"
-epublib = "4.0"
+epublib = "3.1"
 glide = "4.16.0"
 viewpager2 = "1.0.0"
 
@@ -37,5 +37,5 @@ glide = { group = "com.github.bumptech.glide", name = "glide", version.ref = "gl
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
-kotlin-kapt = { id = "org.jetbrains.kotlin.kapt", version.ref = "kotlin" }
+kotlin-ksp = { id = "com.google.devtools.ksp", version = "2.0.21-1.0.28" }
 

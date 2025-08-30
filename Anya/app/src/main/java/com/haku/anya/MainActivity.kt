@@ -1,30 +1,20 @@
 package com.haku.anya
 
 import android.os.Bundle
+import android.widget.TextView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.navigation.fragment.NavHostFragment
-import androidx.navigation.ui.setupWithNavController
-import com.google.android.material.bottomnavigation.BottomNavigationView
-import com.haku.anya.databinding.ActivityMainBinding
 
 class MainActivity : AppCompatActivity() {
     
-    private lateinit var binding: ActivityMainBinding
-    
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        binding = ActivityMainBinding.inflate(layoutInflater)
-        setContentView(binding.root)
         
-        setupNavigation()
-    }
-    
-    private fun setupNavigation() {
-        val navHostFragment = supportFragmentManager
-            .findFragmentById(R.id.nav_host_fragment) as NavHostFragment
-        val navController = navHostFragment.navController
+        // 创建一个简单的TextView来测试基本功能
+        val textView = TextView(this)
+        textView.text = "Anya 电子书阅读器\n\n应用启动成功！\n\n这是一个测试版本"
+        textView.textSize = 18f
+        textView.setPadding(50, 100, 50, 100)
         
-        val bottomNav = findViewById<BottomNavigationView>(R.id.bottom_navigation)
-        bottomNav.setupWithNavController(navController)
+        setContentView(textView)
     }
 }

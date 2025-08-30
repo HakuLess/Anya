@@ -32,7 +32,7 @@
                 android:layout_gravity="top|end"
                 android:layout_margin="8dp"
                 android:src="@drawable/ic_favorite"
-                android:tint="@android:color/red"
+                android:tint="@color/error"
                 android:visibility="gone" />
 
         </FrameLayout>

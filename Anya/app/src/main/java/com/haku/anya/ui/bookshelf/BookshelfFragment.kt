@@ -20,6 +20,8 @@ import com.haku.anya.R
 import com.haku.anya.databinding.FragmentBookshelfBinding
 import com.haku.anya.epub.EpubParser
 import com.haku.anya.ui.reader.ReaderActivity
+import com.haku.anya.ui.bookshelf.adapter.BooksAdapter
+import com.haku.anya.ui.bookshelf.adapter.CategoriesAdapter
 import kotlinx.coroutines.launch
 
 class BookshelfFragment : Fragment() {

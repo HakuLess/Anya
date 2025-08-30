@@ -1,17 +1,17 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
-    alias(libs.plugins.kotlin.kapt)
+    alias(libs.plugins.kotlin.ksp)
 }
 
 android {
     namespace = "com.haku.anya"
-    compileSdk = 36
+    compileSdk = 34
 
     defaultConfig {
         applicationId = "com.haku.anya"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 34
         versionCode = 1
         versionName = "1.0"
 
@@ -45,7 +45,7 @@ dependencies {
     // Room数据库
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
-    kapt(libs.androidx.room.compiler)
+    ksp(libs.androidx.room.compiler)
     
     // Navigation导航
     implementation(libs.androidx.navigation.fragment.ktx)
@@ -62,7 +62,7 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     
     // EPUB解析
-    implementation(libs.epublib.core)
+    // implementation(libs.epublib.core)
     
     // 图片加载
     implementation(libs.glide)
