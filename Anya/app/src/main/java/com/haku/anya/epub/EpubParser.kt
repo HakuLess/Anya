@@ -1,37 +1,64 @@
 package com.haku.anya.epub
 
 import android.content.Context
-import android.graphics.Bitmap
+import android.net.Uri
 import com.haku.anya.data.Book
 import java.io.File
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
-// TODO: 重新实现EPUB解析功能，当前暂时禁用
+/**
+ * 简化版EPUB解析器
+ * 仅提取基本信息，不依赖第三方库
+ */
 class EpubParser(private val context: Context) {
     
-    fun parseEpub(filePath: String): Book? {
-        // 临时实现，返回基本信息
-        return try {
+    suspend fun parseEpub(filePath: String): Book? = withContext(Dispatchers.IO) {
+        try {
             val file = File(filePath)
-            val title = file.nameWithoutExtension
-            val author = "未知作者"
-            val fileSize = file.length()
+            if (!file.exists()) return@withContext null
             
+            // 简化实现：仅提取文件名和大小
             Book(
-                title = title,
-                author = author,
+                title = file.nameWithoutExtension,
+                author = "未知作者",
                 coverPath = "",
                 filePath = filePath,
-                fileSize = fileSize,
-                totalPages = 0
+                fileSize = file.length(),
+                totalPages = 1 // 简化处理
             )
         } catch (e: Exception) {
-            e.printStackTrace()
             null
         }
     }
     
-    fun getPageImage(epubBook: Any, pageNumber: Int): Bitmap? {
-        // 临时实现，返回null
-        return null
+    suspend fun parseEpubFromUri(uri: Uri): Book? = withContext(Dispatchers.IO) {
+        try {
+            val fileName = context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getString(cursor.getColumnIndex("_display_name"))
+                else null
+            } ?: uri.path?.substringAfterLast('/') ?: "unknown.epub"
+            
+            // 复制文件到应用目录
+            val destFile = File(context.getExternalFilesDir(null), "books/$fileName")
+            destFile.parentFile?.mkdirs()
+            
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                destFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            
+            Book(
+                title = fileName.substringBeforeLast("."),
+                author = "未知作者",
+                coverPath = "",
+                filePath = destFile.absolutePath,
+                fileSize = destFile.length(),
+                totalPages = 1 // 简化处理
+            )
+        } catch (e: Exception) {
+            null
+        }
     }
 }

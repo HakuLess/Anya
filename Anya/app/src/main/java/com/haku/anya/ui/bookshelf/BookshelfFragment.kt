@@ -4,7 +4,10 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.DocumentsContract
 import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
@@ -22,6 +25,7 @@ import com.haku.anya.epub.EpubParser
 import com.haku.anya.ui.reader.ReaderActivity
 import com.haku.anya.ui.bookshelf.adapter.BooksAdapter
 import com.haku.anya.ui.bookshelf.adapter.CategoriesAdapter
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 class BookshelfFragment : Fragment() {
@@ -33,20 +37,41 @@ class BookshelfFragment : Fragment() {
     private lateinit var booksAdapter: BooksAdapter
     private lateinit var categoriesAdapter: CategoriesAdapter
     
+    // 权限请求
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
         if (isGranted) {
-            openFilePicker()
+            showImportOptionsDialog()
         } else {
             Snackbar.make(binding.root, "需要存储权限来添加书籍", Snackbar.LENGTH_LONG).show()
         }
     }
     
+    // 文件选择器
     private val pickFileLauncher = registerForActivityResult(
         ActivityResultContracts.GetContent()
     ) { uri ->
         uri?.let { addBookFromUri(it) }
+    }
+    
+    // 文件夹选择器
+    private val pickFolderLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Android 11+ 持久化访问权限
+            uri?.let { 
+                requireContext().contentResolver.takePersistableUriPermission(
+                    it,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION or
+                    Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                )
+                scanFolderFromUri(it)
+            }
+        } else {
+            uri?.let { scanFolderFromUri(it) }
+        }
     }
     
     override fun onCreateView(
@@ -107,11 +132,41 @@ class BookshelfFragment : Fragment() {
         viewModel.currentCategory.observe(viewLifecycleOwner) { categoryId ->
             viewModel.loadBooksByCategory(categoryId)
         }
+        
+        // 观察扫描状态
+        lifecycleScope.launch {
+            viewModel.scanningState.collect { state ->
+                when (state) {
+                    is BookshelfViewModel.ScanningState.Idle -> {
+                        hideProgressDialog()
+                    }
+                    is BookshelfViewModel.ScanningState.Scanning -> {
+                        showProgressDialog(state.progress, state.foundCount)
+                    }
+                    is BookshelfViewModel.ScanningState.Completed -> {
+                        hideProgressDialog()
+                        Snackbar.make(
+                            binding.root,
+                            "扫描完成，共添加 ${state.totalFound} 本书籍",
+                            Snackbar.LENGTH_LONG
+                        ).show()
+                    }
+                    is BookshelfViewModel.ScanningState.Error -> {
+                        hideProgressDialog()
+                        Snackbar.make(
+                            binding.root,
+                            "扫描出错: ${state.message}",
+                            Snackbar.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
+        }
     }
     
     private fun setupClickListeners() {
         binding.fabAddBook.setOnClickListener {
-            checkPermissionAndOpenFilePicker()
+            checkPermissionAndShowImportOptions()
         }
         
         binding.fabAddCategory.setOnClickListener {
@@ -119,43 +174,69 @@ class BookshelfFragment : Fragment() {
         }
     }
     
-    private fun checkPermissionAndOpenFilePicker() {
-        when {
-            ContextCompat.checkSelfPermission(
-                requireContext(),
-                Manifest.permission.READ_EXTERNAL_STORAGE
-            ) == PackageManager.PERMISSION_GRANTED -> {
-                openFilePicker()
-            }
-            else -> {
-                requestPermissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+    private fun checkPermissionAndShowImportOptions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Android 11+ 使用存储访问框架(SAF)，不需要请求权限
+            showImportOptionsDialog()
+        } else {
+            // Android 10及以下版本请求READ_EXTERNAL_STORAGE权限
+            when {
+                ContextCompat.checkSelfPermission(
+                    requireContext(),
+                    Manifest.permission.READ_EXTERNAL_STORAGE
+                ) == PackageManager.PERMISSION_GRANTED -> {
+                    showImportOptionsDialog()
+                }
+                else -> {
+                    requestPermissionLauncher.launch(Manifest.permission.READ_EXTERNAL_STORAGE)
+                }
             }
         }
     }
     
+    private fun showImportOptionsDialog() {
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("导入电子书")
+            .setItems(arrayOf("选择单个EPUB文件", "扫描文件夹")) { _, which ->
+                when (which) {
+                    0 -> openFilePicker()
+                    1 -> openFolderPicker()
+                }
+            }
+            .show()
+    }
+    
     private fun openFilePicker() {
-        pickFileLauncher.launch("*/*")
+        pickFileLauncher.launch("application/epub+zip")
+    }
+    
+    private fun openFolderPicker() {
+        pickFolderLauncher.launch(null)
     }
     
     private fun addBookFromUri(uri: Uri) {
         lifecycleScope.launch {
             try {
-                // 这里需要将URI转换为文件路径，实际应用中可能需要更复杂的处理
-                val filePath = uri.path ?: return@launch
-                if (filePath.endsWith(".epub", true)) {
-                    val epubParser = EpubParser(requireContext())
-                    val book = epubParser.parseEpub(filePath)
-                    book?.let {
-                        viewModel.addBook(it)
-                        Snackbar.make(binding.root, "书籍添加成功", Snackbar.LENGTH_SHORT).show()
-                    }
-                } else {
-                    Snackbar.make(binding.root, "只支持EPUB格式", Snackbar.LENGTH_LONG).show()
+                showProgressDialog(0, 1)
+                val epubParser = EpubParser(requireContext())
+                val book = epubParser.parseEpubFromUri(uri)
+                hideProgressDialog()
+                
+                book?.let {
+                    viewModel.addBook(it)
+                    Snackbar.make(binding.root, "书籍添加成功", Snackbar.LENGTH_SHORT).show()
+                } ?: run {
+                    Snackbar.make(binding.root, "无法解析EPUB文件", Snackbar.LENGTH_LONG).show()
                 }
             } catch (e: Exception) {
+                hideProgressDialog()
                 Snackbar.make(binding.root, "添加书籍失败: ${e.message}", Snackbar.LENGTH_LONG).show()
             }
         }
+    }
+    
+    private fun scanFolderFromUri(uri: Uri) {
+        viewModel.scanFolderFromUri(uri)
     }
     
     private fun openBook(book: com.haku.anya.data.Book) {
@@ -201,6 +282,33 @@ class BookshelfFragment : Fragment() {
     private fun showAddCategoryDialog() {
         // 实现添加分类对话框
         Snackbar.make(binding.root, "添加分类功能开发中", Snackbar.LENGTH_SHORT).show()
+    }
+    
+    // 进度对话框
+    private var progressDialog: androidx.appcompat.app.AlertDialog? = null
+    
+    private fun showProgressDialog(current: Int, total: Int) {
+        if (progressDialog == null) {
+            val dialogView = layoutInflater.inflate(R.layout.dialog_progress, null)
+            progressDialog = MaterialAlertDialogBuilder(requireContext())
+                .setView(dialogView)
+                .setCancelable(false)
+                .create()
+            progressDialog?.show()
+        }
+        
+        // 更新进度
+        val progressBar = progressDialog?.findViewById<android.widget.ProgressBar>(R.id.progressBar)
+        val progressText = progressDialog?.findViewById<android.widget.TextView>(R.id.progressText)
+        
+        progressBar?.max = total
+        progressBar?.progress = current
+        progressText?.text = "正在扫描: $current / $total"
+    }
+    
+    private fun hideProgressDialog() {
+        progressDialog?.dismiss()
+        progressDialog = null
     }
     
     override fun onDestroyView() {

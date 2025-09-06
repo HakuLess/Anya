@@ -21,7 +21,10 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
     compileOptions {
@@ -34,6 +37,16 @@ android {
     buildFeatures {
         viewBinding = true
         dataBinding = true
+    }
+    
+    packaging {
+        resources {
+            excludes += listOf(
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE.txt",
+                "META-INF/DEPENDENCIES"
+            )
+        }
     }
 }
 
@@ -61,11 +74,13 @@ dependencies {
     // 协程
     implementation(libs.kotlinx.coroutines.android)
     
-    // EPUB解析
-    // implementation(libs.epublib.core)
+    // 移除了EPUB解析库依赖，使用简化实现
     
     // 图片加载
     implementation(libs.glide)
+    
+    // 文件访问
+    implementation("androidx.documentfile:documentfile:1.0.1")
     
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
