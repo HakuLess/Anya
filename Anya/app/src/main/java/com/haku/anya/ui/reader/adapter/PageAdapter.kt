@@ -23,7 +23,7 @@ class PageAdapter : ListAdapter<Bitmap, PageAdapter.PageViewHolder>(PageDiffCall
     }
     
     class PageViewHolder(itemView: View) : RecyclerView.ViewHolder(itemView) {
-        private val imageView: ImageView = itemView.findViewById(R.id.page_image)
+        private val imageView: ImageView = itemView.findViewById(R.id.imageView)
         
         fun bind(bitmap: Bitmap) {
             imageView.setImageBitmap(bitmap)

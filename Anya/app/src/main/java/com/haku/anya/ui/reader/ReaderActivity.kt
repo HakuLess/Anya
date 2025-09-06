@@ -1,95 +1,278 @@
 package com.haku.anya.ui.reader
 
-import android.graphics.Bitmap
 import android.os.Bundle
-import android.view.GestureDetector
-import android.view.MotionEvent
+import android.util.Log
+import android.view.LayoutInflater
 import android.view.View
-import android.view.animation.Animation
-import android.view.animation.AnimationUtils
+import android.view.ViewGroup
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.ImageView
 import androidx.appcompat.app.AppCompatActivity
-import androidx.lifecycle.lifecycleScope
+import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
+import com.bumptech.glide.Glide
 import com.haku.anya.data.AppDatabase
 import com.haku.anya.data.Book
+import com.haku.anya.databinding.ActivityReaderBinding
+import com.haku.anya.databinding.ItemPageBinding
 import com.haku.anya.epub.EpubParser
 import com.haku.anya.repository.BookRepository
-import com.haku.anya.ui.reader.adapter.PageAdapter
-import com.haku.anya.ui.reader.animation.PageTurnAnimation
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.File
 
-// TODO: 重新实现ReaderActivity，当前暂时禁用
 class ReaderActivity : AppCompatActivity() {
-    
-    // private lateinit var binding: com.haku.anya.ui.reader.databinding.ActivityReaderBinding
-    private lateinit var pageAdapter: PageAdapter
+    private lateinit var binding: ActivityReaderBinding
     private lateinit var epubParser: EpubParser
-    private lateinit var bookRepository: BookRepository
-    
     private var currentBook: Book? = null
-    private var epubBook: Any? = null
-    private var currentPage = 0
-    private var totalPages = 0
-    
-    private lateinit var gestureDetector: GestureDetector
-    private var isPageTurning = false
-    
+    private val pages = mutableListOf<PageContent>()
+
+    // 页面内容数据类
+    data class PageContent(
+        val type: String, // "text" or "image"
+        val content: String, // HTML内容或图片路径
+        val pageNum: Int
+    )
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // binding = com.haku.anya.ui.reader.databinding.ActivityReaderBinding.inflate(layoutInflater)
-        // setContentView(binding.root)
+        binding = ActivityReaderBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+
+        // 初始化
+        val bookId = intent.getLongExtra("book_id", -1)
+        if (bookId == -1L) finish()
+
+        epubParser = EpubParser(this)
+        val db = AppDatabase.getDatabase(applicationContext)
+        val bookRepository = BookRepository(db.bookDao())
+
+        // 加载书籍和页面
+        CoroutineScope(Dispatchers.Main).launch {
+            currentBook = bookRepository.getBookById(bookId)
+            currentBook?.let { book ->
+                loadBookPages(book.filePath)
+                setupViewPager()
+            }
+        }
+    }
+
+    private suspend fun loadBookPages(filePath: String) {
+        pages.clear()
         
-        // setupViews()
-        // loadBook()
-        // setupGestureDetection()
+        // 1. 提取所有EPUB资源
+        val resourceDir = epubParser.extractEpubResources(filePath)
+        if (resourceDir.isEmpty()) {
+            Log.e("ReaderActivity", "Failed to extract EPUB resources")
+            return
+        }
+
+        // 2. 解析EPUB文件结构并排序
+        val epubStructure = epubParser.parseEpubStructure(filePath)
+            .sortedBy { it.name }
+        
+        // 3. 按顺序加载内容
+        epubStructure.forEachIndexed { index, entry ->
+            try {
+                when {
+                    entry.name.endsWith(".html") || entry.name.endsWith(".xhtml") -> {
+                        val content = epubParser.getEntryContent(filePath, entry.name)
+                        pages.add(PageContent("text", content, index + 1))
+                    }
+                    entry.name.endsWith(".jpg") || entry.name.endsWith(".png") -> {
+                        val imageFile = File(resourceDir, entry.name)
+                        if (imageFile.exists()) {
+                            pages.add(PageContent("image", imageFile.absolutePath, index + 1))
+                        } else {
+                            Log.e("ReaderActivity", "Image file not found: ${imageFile.absolutePath}")
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("ReaderActivity", "Error loading entry: ${entry.name}", e)
+            }
+        }
+        
+        // 4. 按pageNum排序确保顺序正确
+        pages.sortBy { it.pageNum }
     }
-    
-    // 暂时注释掉所有方法
-    /*
-    private fun setupViews() {
-        // TODO: 重新实现
+
+    private fun setupViewPager() {
+        // 预先计算资源目录路径
+        val resourceDir = currentBook?.filePath?.let { 
+            File(getExternalFilesDir(null), 
+                "epub_resources/${File(it).nameWithoutExtension}").absolutePath
+        } ?: ""
+        
+        binding.viewPager.adapter = PageAdapter(resourceDir)
+        binding.viewPager.orientation = ViewPager2.ORIENTATION_HORIZONTAL
+        
+        // 页面切换回调
+        binding.viewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+            override fun onPageSelected(position: Int) {
+                updatePageIndicator(position)
+            }
+        })
+        
+        // 初始页面指示器
+        updatePageIndicator(0)
     }
-    
-    private fun loadBook() {
-        // TODO: 重新实现
+
+    private fun updatePageIndicator(currentPosition: Int) {
+        binding.pageIndicator.text = "${currentPosition + 1}/${pages.size}"
     }
-    
-    private fun loadPages() {
-        // TODO: 重新实现
+
+    // 页面适配器
+    inner class PageAdapter(private val resourceDir: String) : RecyclerView.Adapter<PageAdapter.PageViewHolder>() {
+        inner class PageViewHolder(val binding: ItemPageBinding) : 
+            RecyclerView.ViewHolder(binding.root)
+
+        override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): PageViewHolder {
+            val binding = ItemPageBinding.inflate(
+                LayoutInflater.from(parent.context), parent, false
+            )
+            return PageViewHolder(binding)
+        }
+
+        override fun onBindViewHolder(holder: PageViewHolder, position: Int) {
+            val page = pages[position]
+            when (page.type) {
+                "text" -> {
+                    holder.binding.webView.visibility = View.VISIBLE
+                    holder.binding.imageView.visibility = View.GONE
+                    
+                    // 配置WebView
+                    holder.binding.webView.settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        allowFileAccess = true
+                        allowContentAccess = true
+                    }
+                    
+                    // 添加详细日志记录资源目录
+                    Log.d("WebViewConfig", "Resource directory: $resourceDir")
+                    Log.d("WebViewConfig", "Page content length: ${page.content.length}")
+
+                    // 设置自定义WebViewClient处理资源加载
+                    holder.binding.webView.webViewClient = object : WebViewClient() {
+                        override fun shouldInterceptRequest(
+                            view: WebView,
+                            request: WebResourceRequest
+                        ): WebResourceResponse? {
+                            val url = request.url.toString()
+                            Log.d("WebView", "Loading resource: $url")
+                            
+                            try {
+                                // 处理相对路径资源
+                                if (url.startsWith("../")) {
+                                    val epubDir = currentBook?.filePath?.let { 
+                                        File(it).parentFile?.absolutePath 
+                                    } ?: ""
+                                    val fullPath = "file://$epubDir/${url.substringAfter("../")}"
+                                    Log.d("WebView", "Resolved relative path to: $fullPath")
+                                    
+                                    // 检查文件是否存在
+                                    val file = File(fullPath.removePrefix("file://"))
+                                    if (file.exists()) {
+                                        Log.d("WebView", "File exists: ${file.absolutePath}")
+                                        return WebResourceResponse(
+                                            getMimeType(file.name),
+                                            "UTF-8",
+                                            file.inputStream()
+                                        )
+                                    } else {
+                                        Log.e("WebView", "File not found: ${file.absolutePath}")
+                                    }
+                                }
+                                
+                                // 处理绝对路径资源
+                                if (url.startsWith("file://")) {
+                                    val file = File(url.removePrefix("file://"))
+                                    if (file.exists()) {
+                                        Log.d("WebView", "Loading file: ${file.absolutePath}")
+                                        return WebResourceResponse(
+                                            getMimeType(file.name),
+                                            "UTF-8",
+                                            file.inputStream()
+                                        )
+                                    } else {
+                                        Log.e("WebView", "File not found: ${file.absolutePath}")
+                                    }
+                                }
+                            } catch (e: Exception) {
+                                Log.e("WebView", "Error loading resource: $url", e)
+                            }
+                            
+                            return super.shouldInterceptRequest(view, request)
+                        }
+                        
+                        private fun getMimeType(fileName: String): String {
+                            val ext = fileName.substringAfterLast('.').lowercase()
+                            return when (ext) {
+                                "jpg", "jpeg" -> "image/jpeg"
+                                "png" -> "image/png" 
+                                "gif" -> "image/gif"
+                                "css" -> "text/css"
+                                "js" -> "application/javascript"
+                                "html", "htm", "xhtml" -> "text/html"
+                                else -> {
+                                    Log.w("MimeType", "Unknown file extension: $ext")
+                                    "*/*"
+                                }
+                            }
+                        }
+                    }
+
+                    // 使用预先传入的资源目录路径
+                    try {
+                        // 确保路径正确编码
+                        // 确保路径包含完整的EPUB文件夹名称
+                    val epubFolderName = currentBook?.filePath?.let { 
+                        File(it).nameWithoutExtension 
+                    } ?: ""
+                    val fullResourceDir = "$resourceDir/$epubFolderName"
+                    val encodedPath = "file://${fullResourceDir.replace(" ", "%20")}/"
+                    Log.d("PathFix", "Full resource path: $encodedPath")
+                        Log.d("WebViewLoad", "Loading with baseURL: $encodedPath")
+                        
+                        holder.binding.webView.loadDataWithBaseURL(
+                            encodedPath,
+                            page.content,
+                            "text/html", 
+                            "UTF-8",
+                            null
+                        )
+                    } catch (e: Exception) {
+                        Log.e("WebViewLoad", "Failed to load content", e)
+                        holder.binding.webView.loadData(
+                            "<html><body>加载失败: ${e.localizedMessage}</body></html>",
+                            "text/html",
+                            "UTF-8"
+                        )
+                    }
+                    
+                    Log.d("ReaderActivity", "WebView baseURL: file://$resourceDir/")
+                }
+                "image" -> {
+                    holder.binding.webView.visibility = View.GONE
+                    holder.binding.imageView.visibility = View.VISIBLE
+                    val imageFile = File(page.content)
+                    if (imageFile.exists()) {
+                        Log.d("ReaderActivity", "Loading image from: ${imageFile.absolutePath}")
+                        Glide.with(this@ReaderActivity)
+                            .load(imageFile)
+                            .into(holder.binding.imageView)
+                    } else {
+                        Log.e("ReaderActivity", "Image file not found: ${imageFile.absolutePath}")
+                    }
+                }
+            }
+        }
+
+        override fun getItemCount() = pages.size
     }
-    
-    private fun getPageBitmap(book: Any, pageNumber: Int): Bitmap? {
-        // TODO: 重新实现
-        return null
-    }
-    
-    private fun updatePageInfo() {
-        // TODO: 重新实现
-    }
-    
-    private fun saveReadingProgress() {
-        // TODO: 重新实现
-    }
-    
-    private fun setupGestureDetection() {
-        // TODO: 重新实现
-    }
-    
-    private fun showSettingsDialog() {
-        // TODO: 重新实现
-    }
-    
-    override fun onTouchEvent(event: MotionEvent?): Boolean {
-        // TODO: 重新实现
-        return super.onTouchEvent(event)
-    }
-    
-    override fun onDestroy() {
-        super.onDestroy()
-        // TODO: 重新实现
-    }
-    */
 }
