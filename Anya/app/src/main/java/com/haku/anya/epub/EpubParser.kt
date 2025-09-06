@@ -20,13 +20,18 @@ import kotlinx.coroutines.withContext
 class EpubParser(private val context: Context) {
     companion object {
         private const val TAG = "EpubParser"
-        private val SUPPORTED_IMAGE_EXT = setOf(".jpg", ".jpeg", ".png", ".gif")
+        private val SUPPORTED_IMAGE_EXT = setOf(".jpg", ".jpeg", ".png", ".gif", ".webp", ".svg")
+        private const val MAX_IMAGE_SIZE_MB = 5L // 5MB限制
+        
+        private fun isImageFile(path: String): Boolean {
+            return SUPPORTED_IMAGE_EXT.any { path.endsWith(it, ignoreCase = true) }
+        }
     }
     
     data class EpubEntry(
-        val name: String,
-        val size: Long,
-        val isDirectory: Boolean
+        val path: String,
+        val index: Int,
+        val isImage: Boolean
     )
     
     suspend fun parseEpub(filePath: String): Book? = withContext(Dispatchers.IO) {
@@ -88,20 +93,49 @@ class EpubParser(private val context: Context) {
     suspend fun parseEpubStructure(filePath: String): List<EpubEntry> = 
         withContext(Dispatchers.IO) {
             try {
-                val zipFile = ZipFile(filePath)
-                val entries = mutableListOf<EpubEntry>()
+                val opfPath = getOpfPath(filePath)
+                val spineOrder = parseOpfSpine(filePath, opfPath)
+                val manifest = parseOpfManifest(filePath, opfPath)
                 
-                zipFile.entries().iterator().forEach { entry ->
-                    entries.add(
-                        EpubEntry(
-                            name = entry.name,
-                            size = entry.size,
-                            isDirectory = entry.isDirectory
-                        )
-                    )
+                val entries = mutableListOf<EpubEntry>()
+                var readingIndex = 0
+                
+                ZipFile(filePath).use { zipFile ->
+                    // 按spine顺序创建条目
+                    spineOrder.forEach { id ->
+                        manifest[id]?.let { href ->
+                            val entryPath = if (href.startsWith("/")) href.drop(1) 
+                                else File(opfPath).parent?.let { "$it/$href" } ?: href
+                            
+                            zipFile.getEntry(entryPath)?.let { entry ->
+                                entries.add(
+                                    EpubEntry(
+                                        path = entry.name,
+                                        index = readingIndex++,
+                                        isImage = isImageFile(entry.name)
+                                    )
+                                )
+                            }
+                        }
+                    }
+                    
+                    // 添加不在spine中的其他资源文件
+                    zipFile.entries().iterator().forEach { entry ->
+                        if (!entries.any { it.path == entry.name }) {
+                            if (isImageFile(entry.name)) {
+                                entries.add(
+                                    EpubEntry(
+                                        path = entry.name,
+                                        index = readingIndex++,
+                                        isImage = true
+                                    )
+                                )
+                            }
+                        }
+                    }
                 }
                 
-                entries.sortedBy { it.name }
+                entries.sortedBy { it.index }
             } catch (e: Exception) {
                 Log.e(TAG, "parseEpubStructure error", e)
                 emptyList()
@@ -203,6 +237,108 @@ class EpubParser(private val context: Context) {
         }
 
     /**
+     * 从HTML内容中提取页面标题
+     */
+    fun getPageTitle(htmlContent: String): String? {
+        return try {
+            val titleStart = htmlContent.indexOf("<title>") + 7
+            val titleEnd = htmlContent.indexOf("</title>")
+            if (titleStart >= 7 && titleEnd > titleStart) {
+                htmlContent.substring(titleStart, titleEnd).trim().takeIf { it.isNotEmpty() }
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to extract title", e)
+            null
+        }
+    }
+
+    /**
+     * 解析OPF文件获取阅读顺序(spine)
+     */
+    private suspend fun parseOpfSpine(filePath: String, opfPath: String): List<String> =
+        withContext(Dispatchers.IO) {
+            try {
+                ZipFile(filePath).use { zipFile ->
+                    zipFile.getEntry(opfPath)?.let { entry ->
+                        zipFile.getInputStream(entry).use { input ->
+                            val opfContent = input.readBytes().toString(Charsets.UTF_8)
+                            val spineStart = opfContent.indexOf("<spine")
+                            val spineEnd = opfContent.indexOf("</spine>")
+                            if (spineStart >= 0 && spineEnd > spineStart) {
+                                opfContent.substring(spineStart, spineEnd)
+                                    .split("<itemref")
+                                    .filter { it.contains("idref=") }
+                                    .map { it.substringAfter("idref=\"").substringBefore("\"") }
+                            } else {
+                                emptyList()
+                            }
+                        }
+                    } ?: emptyList()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "parseOpfSpine error", e)
+                emptyList()
+            }
+        }
+
+    /**
+     * 解析OPF文件获取manifest映射
+     */
+    private suspend fun parseOpfManifest(filePath: String, opfPath: String): Map<String, String> =
+        withContext(Dispatchers.IO) {
+            try {
+                ZipFile(filePath).use { zipFile ->
+                    zipFile.getEntry(opfPath)?.let { entry ->
+                        zipFile.getInputStream(entry).use { input ->
+                            val opfContent = input.readBytes().toString(Charsets.UTF_8)
+                            val manifestStart = opfContent.indexOf("<manifest")
+                            val manifestEnd = opfContent.indexOf("</manifest>")
+                            if (manifestStart >= 0 && manifestEnd > manifestStart) {
+                                opfContent.substring(manifestStart, manifestEnd)
+                                    .split("<item")
+                                    .filter { it.contains("href=") }
+                                    .associate {
+                                        val id = it.substringAfter("id=\"").substringBefore("\"")
+                                        val href = it.substringAfter("href=\"").substringBefore("\"")
+                                        id to href
+                                    }
+                            } else {
+                                emptyMap()
+                            }
+                        }
+                    } ?: emptyMap()
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "parseOpfManifest error", e)
+                emptyMap()
+            }
+        }
+
+    /**
+     * 获取OPF文件路径
+     */
+    private suspend fun getOpfPath(filePath: String): String =
+        withContext(Dispatchers.IO) {
+            try {
+                ZipFile(filePath).use { zipFile ->
+                    zipFile.getEntry("META-INF/container.xml")?.let { entry ->
+                        zipFile.getInputStream(entry).use { input ->
+                            val container = input.readBytes().toString(Charsets.UTF_8)
+                            container.substringAfter("<rootfile")
+                                .substringAfter("full-path=\"")
+                                .substringBefore("\"")
+                        }
+                    } ?: "content.opf"
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "getOpfPath error", e)
+                "content.opf"
+            }
+        }
+
+    /**
      * 提取图片文件到缓存目录
      */
     suspend fun extractImage(filePath: String, imageEntry: String): String =
@@ -227,6 +363,12 @@ class EpubParser(private val context: Context) {
                 // 提取图片
                 ZipFile(filePath).use { zipFile ->
                     zipFile.getEntry(imageEntry)?.let { entry ->
+                        // 检查图片大小限制
+                        if (entry.size > MAX_IMAGE_SIZE_MB * 1024 * 1024) {
+                            Log.w(TAG, "Image too large (${entry.size} bytes), skipping: $imageEntry")
+                            return@withContext ""
+                        }
+                        
                         if (entry.size > 0) {
                             zipFile.getInputStream(entry)?.use { input ->
                                 FileOutputStream(outputFile).use { output ->

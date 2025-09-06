@@ -35,7 +35,11 @@ class ReaderActivity : AppCompatActivity() {
     data class PageContent(
         val type: String, // "text" or "image"
         val content: String, // HTML内容或图片路径
-        val pageNum: Int
+        val pageNum: Int,
+        val originalOrder: Int, // 原始EPUB中的顺序
+        val isFirstPage: Boolean,
+        val isLastPage: Boolean,
+        val title: String? // 页面标题(如果有)
     )
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -71,29 +75,44 @@ class ReaderActivity : AppCompatActivity() {
             return
         }
 
-        // 2. 解析EPUB文件结构并排序
+        // 2. 解析EPUB文件结构(已按index排序)
         val epubStructure = epubParser.parseEpubStructure(filePath)
-            .sortedBy { it.name }
         
         // 3. 按顺序加载内容
         epubStructure.forEachIndexed { index, entry ->
             try {
                 when {
-                    entry.name.endsWith(".html") || entry.name.endsWith(".xhtml") -> {
-                        val content = epubParser.getEntryContent(filePath, entry.name)
-                        pages.add(PageContent("text", content, index + 1))
+                    entry.path.endsWith(".html") || entry.path.endsWith(".xhtml") -> {
+                        val content = epubParser.getEntryContent(filePath, entry.path)
+                        pages.add(PageContent(
+                            type = "text",
+                            content = content,
+                            pageNum = index + 1,
+                            originalOrder = entry.index, // 使用EPUB条目原始index
+                            isFirstPage = index == 0,
+                            isLastPage = index == epubStructure.size - 1,
+                            title = epubParser.getPageTitle(content)
+                        ))
                     }
-                    entry.name.endsWith(".jpg") || entry.name.endsWith(".png") -> {
-                        val imageFile = File(resourceDir, entry.name)
+                    entry.isImage -> {
+                        val imageFile = File(resourceDir, entry.path)
                         if (imageFile.exists()) {
-                            pages.add(PageContent("image", imageFile.absolutePath, index + 1))
+                            pages.add(PageContent(
+                            type = "image", 
+                            content = imageFile.absolutePath,
+                            pageNum = index + 1,
+                            originalOrder = index,
+                            isFirstPage = index == 0,
+                            isLastPage = index == epubStructure.size - 1,
+                            title = File(entry.path).nameWithoutExtension
+                        ))
                         } else {
                             Log.e("ReaderActivity", "Image file not found: ${imageFile.absolutePath}")
                         }
                     }
                 }
             } catch (e: Exception) {
-                Log.e("ReaderActivity", "Error loading entry: ${entry.name}", e)
+                Log.e("ReaderActivity", "Error loading entry: ${entry.path}", e)
             }
         }
         
@@ -123,7 +142,13 @@ class ReaderActivity : AppCompatActivity() {
     }
 
     private fun updatePageIndicator(currentPosition: Int) {
-        binding.pageIndicator.text = "${currentPosition + 1}/${pages.size}"
+        val page = pages.getOrNull(currentPosition)
+        binding.pageIndicator.text = buildString {
+            append("${currentPosition + 1}/${pages.size}")
+            page?.title?.takeIf { it.isNotEmpty() }?.let { 
+                append(" - $it")
+            }
+        }
     }
 
     // 页面适配器
