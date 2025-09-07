@@ -37,6 +37,7 @@ class ReaderActivity : AppCompatActivity() {
         val content: String, // HTML内容或图片路径
         val pageNum: Int,
         val originalOrder: Int, // 原始EPUB中的顺序
+        val extractedPageNumber: Int, // 从标题中提取的页码
         val isFirstPage: Boolean,
         val isLastPage: Boolean,
         val title: String? // 页面标题(如果有)
@@ -78,37 +79,50 @@ class ReaderActivity : AppCompatActivity() {
         // 2. 解析EPUB文件结构(已按index排序)
         val epubStructure = epubParser.parseEpubStructure(filePath)
         
-        // 3. 按顺序加载内容
+        // 3. 先收集HTML目录下的所有HTML/XHTML页面
+        val tempPages = mutableListOf<PageContent>()
+        
+        // 存储封面页面内容
+        var coverContent: String? = null
+        var coverPath: String? = null
+        
+        // 尝试获取封面图片路径
+        val opfPath = epubParser.getOpfPath(filePath)
+        val originalCoverPath = epubParser.extractCoverImage(filePath, opfPath)
+        if (originalCoverPath.isNotEmpty()) {
+            coverPath = originalCoverPath
+        }
+        
         epubStructure.forEachIndexed { index, entry ->
             try {
-                when {
-                    entry.path.endsWith(".html") || entry.path.endsWith(".xhtml") -> {
-                        val content = epubParser.getEntryContent(filePath, entry.path)
-                        pages.add(PageContent(
-                            type = "text",
-                            content = content,
-                            pageNum = index + 1,
-                            originalOrder = entry.index, // 使用EPUB条目原始index
-                            isFirstPage = index == 0,
-                            isLastPage = index == epubStructure.size - 1,
-                            title = epubParser.getPageTitle(content)
-                        ))
-                    }
-                    entry.isImage -> {
-                        val imageFile = File(resourceDir, entry.path)
-                        if (imageFile.exists()) {
-                            pages.add(PageContent(
-                            type = "image", 
-                            content = imageFile.absolutePath,
-                            pageNum = index + 1,
-                            originalOrder = index,
-                            isFirstPage = index == 0,
-                            isLastPage = index == epubStructure.size - 1,
-                            title = File(entry.path).nameWithoutExtension
-                        ))
-                        } else {
-                            Log.e("ReaderActivity", "Image file not found: ${imageFile.absolutePath}")
-                        }
+                // 只处理HTML目录下的HTML/XHTML文件
+                if ((entry.path.endsWith(".html") || entry.path.endsWith(".xhtml")) && 
+                    entry.path.contains("/html/") || entry.path.startsWith("html/")) {
+                    
+                    val content = epubParser.getEntryContent(filePath, entry.path)
+                    val title = epubParser.getPageTitle(content)
+                    val extractedPageNum = epubParser.extractPageNumber(title)
+                    
+                    // 尝试从文件名中提取数字作为备选排序依据
+                    val fileNameNumber = extractNumberFromFileName(entry.path)
+                    
+                    tempPages.add(PageContent(
+                        type = "text",
+                        content = content,
+                        pageNum = index + 1, // 临时页码，后续会重新排序
+                        originalOrder = entry.index, // 保留原始EPUB条目index
+                        extractedPageNumber = if (extractedPageNum > 0) extractedPageNum else fileNameNumber,
+                        isFirstPage = false, // 暂时设为false，排序后重新计算
+                        isLastPage = false, // 暂时设为false，排序后重新计算
+                        title = title
+                    ))
+                } else if (entry.isImage && coverPath != null && 
+                           (entry.path == coverPath || entry.path.contains(coverPath))) {
+                    // 如果是封面图片，保存但不添加到普通页面列表
+                    val imageFile = File(resourceDir, entry.path)
+                    if (imageFile.exists()) {
+                        val coverHtml = generateCoverHtml(imageFile.absolutePath)
+                        coverContent = coverHtml
                     }
                 }
             } catch (e: Exception) {
@@ -116,8 +130,100 @@ class ReaderActivity : AppCompatActivity() {
             }
         }
         
-        // 4. 按pageNum排序确保顺序正确
-        pages.sortBy { it.pageNum }
+        // 4. 按提取的页码排序，如果页码无法提取则按原始顺序
+        val sortedPages = tempPages.sortedWith(compareBy({
+            // 对于有有效页码的页面，按页码排序
+            if (it.extractedPageNumber > 0) it.extractedPageNumber else Int.MAX_VALUE
+        }, {
+            // 对于没有有效页码的页面，按原始顺序排序
+            it.originalOrder
+        }))
+        
+        // 5. 重新计算页码和是否为第一页/最后一页，并添加封面(如果有)
+        if (coverContent != null) {
+            // 添加封面作为首页
+            pages.add(PageContent(
+                type = "text",
+                content = coverContent!!,
+                pageNum = 1,
+                originalOrder = -1, // 封面不是原始EPUB中的页面
+                extractedPageNumber = 0, // 封面页码为0
+                isFirstPage = true,
+                isLastPage = sortedPages.isEmpty(),
+                title = "cover"
+            ))
+        }
+        
+        // 添加排序后的HTML页面
+        sortedPages.forEachIndexed { index, page ->
+            val pageIndex = if (coverContent != null) index + 2 else index + 1
+            pages.add(page.copy(
+                pageNum = pageIndex,
+                isFirstPage = coverContent == null && index == 0,
+                isLastPage = index == sortedPages.size - 1
+            ))
+        }
+        
+        // 6. 确保书籍对象中的总页数与实际加载的页数一致
+        currentBook?.let {
+            if (pages.size > 0 && it.totalPages != pages.size) {
+                // 更新书籍的总页数
+                val db = AppDatabase.getDatabase(applicationContext)
+                val bookRepository = BookRepository(db.bookDao())
+                val updatedBook = it.copy(totalPages = pages.size)
+                bookRepository.updateBook(updatedBook)
+                currentBook = updatedBook
+            }
+        }
+    }
+    
+    /**
+     * 从文件名中提取数字
+     */
+    private fun extractNumberFromFileName(filePath: String): Int {
+        try {
+            // 匹配文件名中的数字序列
+            val numberRegex = Regex("(\\d+)")
+            val match = numberRegex.find(filePath)
+            return match?.groupValues?.get(1)?.toIntOrNull() ?: -1
+        } catch (e: Exception) {
+            Log.e("ReaderActivity", "Failed to extract number from file name: $filePath", e)
+            return -1
+        }
+    }
+    
+    /**
+     * 生成显示封面图片的HTML内容
+     */
+    private fun generateCoverHtml(imagePath: String): String {
+        return """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>cover</title>
+            <style>
+                body {
+                    margin: 0;
+                    padding: 0;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                    height: 100vh;
+                    background-color: #f5f5f5;
+                }
+                img {
+                    max-width: 100%;
+                    max-height: 100%;
+                    object-fit: contain;
+                }
+            </style>
+        </head>
+        <body>
+            <img src="file://$imagePath" alt="封面">
+        </body>
+        </html>
+        """
     }
 
     private fun setupViewPager() {

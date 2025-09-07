@@ -39,16 +39,23 @@ class EpubParser(private val context: Context) {
             val file = File(filePath)
             if (!file.exists()) return@withContext null
             
-            // 简化实现：仅提取文件名和大小
+            // 解析OPF获取详细信息
+            val opfPath = getOpfPath(filePath)
+            val title = parseBookTitle(filePath, opfPath)
+            val author = parseBookAuthor(filePath, opfPath)
+            val totalPages = calculateTotalPages(filePath, opfPath)
+            val coverPath = extractCoverImage(filePath, opfPath)
+            
             Book(
-                title = file.nameWithoutExtension,
-                author = "未知作者",
-                coverPath = "",
+                title = title.ifEmpty { file.nameWithoutExtension },
+                author = author.ifEmpty { "未知作者" },
+                coverPath = coverPath,
                 filePath = filePath,
                 fileSize = file.length(),
-                totalPages = 1 // 简化处理
+                totalPages = totalPages
             )
         } catch (e: Exception) {
+            Log.e(TAG, "parseEpub error", e)
             null
         }
     }
@@ -70,13 +77,20 @@ class EpubParser(private val context: Context) {
                 }
             }
             
+            // 解析OPF获取详细信息
+            val opfPath = getOpfPath(destFile.absolutePath)
+            val title = parseBookTitle(destFile.absolutePath, opfPath)
+            val author = parseBookAuthor(destFile.absolutePath, opfPath)
+            val totalPages = calculateTotalPages(destFile.absolutePath, opfPath)
+            val coverPath = extractCoverImage(destFile.absolutePath, opfPath)
+            
             Book(
-                title = fileName.substringBeforeLast("."),
-                author = "未知作者",
-                coverPath = "",
+                title = title.ifEmpty { fileName.substringBeforeLast(".") },
+                author = author.ifEmpty { "未知作者" },
+                coverPath = coverPath,
                 filePath = destFile.absolutePath,
                 fileSize = destFile.length(),
-                totalPages = 1 // 简化处理
+                totalPages = totalPages
             )
         } catch (e: Exception) {
             Log.e(TAG, "parseEpubFromUri error", e)
@@ -255,6 +269,41 @@ class EpubParser(private val context: Context) {
     }
 
     /**
+     * 从页面标题中提取页码
+     * 支持格式如: "第 19 頁"、"Page 19"等
+     */
+    fun extractPageNumber(title: String?): Int {
+        if (title.isNullOrEmpty()) return -1
+        
+        try {
+            // 查找中文格式: 第 19 頁 或 第19页
+            val chinesePattern = Regex("第\\s*(\\d+)\\s*[頁页]")
+            val chineseMatch = chinesePattern.find(title)
+            if (chineseMatch != null) {
+                return chineseMatch.groupValues[1].toIntOrNull() ?: -1
+            }
+            
+            // 查找英文格式: Page 19
+            val englishPattern = Regex("Page\\s*(\\d+)", RegexOption.IGNORE_CASE)
+            val englishMatch = englishPattern.find(title)
+            if (englishMatch != null) {
+                return englishMatch.groupValues[1].toIntOrNull() ?: -1
+            }
+            
+            // 尝试直接从标题中提取数字
+            val numberPattern = Regex("(\\d+)")
+            val numberMatch = numberPattern.find(title)
+            if (numberMatch != null) {
+                return numberMatch.groupValues[1].toIntOrNull() ?: -1
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to extract page number from title: $title", e)
+        }
+        
+        return -1
+    }
+
+    /**
      * 解析OPF文件获取阅读顺序(spine)
      */
     private suspend fun parseOpfSpine(filePath: String, opfPath: String): List<String> =
@@ -319,7 +368,7 @@ class EpubParser(private val context: Context) {
     /**
      * 获取OPF文件路径
      */
-    private suspend fun getOpfPath(filePath: String): String =
+    public suspend fun getOpfPath(filePath: String): String =
         withContext(Dispatchers.IO) {
             try {
                 ZipFile(filePath).use { zipFile ->
@@ -337,6 +386,144 @@ class EpubParser(private val context: Context) {
                 "content.opf"
             }
         }
+
+    /**
+     * 解析书籍标题从OPF文件
+     */
+    private suspend fun parseBookTitle(filePath: String, opfPath: String): String = withContext(Dispatchers.IO) {
+        try {
+            ZipFile(filePath).use { zipFile ->
+                zipFile.getEntry(opfPath)?.let { entry ->
+                    zipFile.getInputStream(entry).use { input ->
+                        val opfContent = input.readBytes().toString(Charsets.UTF_8)
+                        
+                        // 查找dc:title元素
+                        val titleRegex = Regex("<dc:title[^>]*>(.*?)</dc:title>", RegexOption.IGNORE_CASE)
+                        val match = titleRegex.find(opfContent)
+                        match?.groupValues?.get(1)?.trim() ?: ""
+                    }
+                } ?: ""
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "parseBookTitle error", e)
+            ""
+        }
+    }
+
+    /**
+     * 解析书籍作者从OPF文件
+     */
+    private suspend fun parseBookAuthor(filePath: String, opfPath: String): String = withContext(Dispatchers.IO) {
+        try {
+            ZipFile(filePath).use { zipFile ->
+                zipFile.getEntry(opfPath)?.let { entry ->
+                    zipFile.getInputStream(entry).use { input ->
+                        val opfContent = input.readBytes().toString(Charsets.UTF_8)
+                        
+                        // 查找dc:creator元素
+                        val authorRegex = Regex("<dc:creator[^>]*>(.*?)</dc:creator>", RegexOption.IGNORE_CASE)
+                        val match = authorRegex.find(opfContent)
+                        match?.groupValues?.get(1)?.trim() ?: ""
+                    }
+                } ?: ""
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "parseBookAuthor error", e)
+            ""
+        }
+    }
+
+    /**
+     * 计算书籍总页数
+     */
+    private suspend fun calculateTotalPages(filePath: String, opfPath: String): Int = withContext(Dispatchers.IO) {
+        try {
+            // 1. 解析spine获取阅读顺序
+            val spineOrder = parseOpfSpine(filePath, opfPath)
+            val manifest = parseOpfManifest(filePath, opfPath)
+            
+            // 2. 统计HTML/XHTML文件的数量作为页数基础
+            var htmlCount = 0
+            
+            spineOrder.forEach { id ->
+                manifest[id]?.let { href ->
+                    if (href.endsWith(".html", ignoreCase = true) || href.endsWith(".xhtml", ignoreCase = true)) {
+                        htmlCount++
+                    }
+                }
+            }
+            
+            // 3. 如果spine为空，回退到直接计算所有HTML文件数量
+            if (htmlCount == 0) {
+                ZipFile(filePath).use { zipFile ->
+                    val entries = zipFile.entries()
+                    while (entries.hasMoreElements()) {
+                        val entry = entries.nextElement()
+                        val name = entry.name
+                        if (!entry.isDirectory && 
+                            (name.endsWith(".html", ignoreCase = true) || 
+                             name.endsWith(".xhtml", ignoreCase = true))) {
+                            htmlCount++
+                        }
+                    }
+                }
+            }
+            
+            // 4. 至少返回1页
+            maxOf(htmlCount, 1)
+        } catch (e: Exception) {
+            Log.e(TAG, "calculateTotalPages error", e)
+            1
+        }
+    }
+
+    /**
+     * 提取封面图片
+     */
+    public suspend fun extractCoverImage(filePath: String, opfPath: String): String = withContext(Dispatchers.IO) {
+        try {
+            ZipFile(filePath).use { zipFile ->
+                zipFile.getEntry(opfPath)?.let { entry ->
+                    zipFile.getInputStream(entry).use { input ->
+                        val opfContent = input.readBytes().toString(Charsets.UTF_8)
+                        
+                        // 尝试查找cover-image属性
+                        val coverRegex = Regex("""cover-image[^>]*href="([^"]*)"""", RegexOption.IGNORE_CASE)
+                        var coverPath = coverRegex.find(opfContent)?.groupValues?.get(1) ?: ""
+                        
+                        if (coverPath.isEmpty()) {
+                            // 尝试查找cover项
+                            val coverItemRegex = Regex("""<item[^>]*id=['"]?cover['"]?[^>]*href="([^"]*)"""", RegexOption.IGNORE_CASE)
+                            coverPath = coverItemRegex.find(opfContent)?.groupValues?.get(1) ?: ""
+                        }
+                        
+                        if (coverPath.isNotEmpty()) {
+                            // 修复路径
+                            val fixedPath = if (coverPath.startsWith('/')) coverPath.drop(1) 
+                                else File(opfPath).parent?.let { "$it/$coverPath" } ?: coverPath
+                            
+                            // 检查文件是否存在
+                            if (zipFile.getEntry(fixedPath) != null) {
+                                return@withContext extractImage(filePath, fixedPath)
+                            }
+                        }
+                        
+                        // 如果没有找到封面，尝试返回第一个图片文件
+                        val entries = zipFile.entries()
+                        while (entries.hasMoreElements()) {
+                            val e = entries.nextElement()
+                            if (!e.isDirectory && isImageFile(e.name)) {
+                                return@withContext extractImage(filePath, e.name)
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "extractCoverImage error", e)
+        }
+        ""
+    }
 
     /**
      * 提取图片文件到缓存目录
